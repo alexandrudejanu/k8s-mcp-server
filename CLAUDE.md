@@ -33,6 +33,13 @@ docker compose -f docker-compose.yml up --build -d
 npx @modelcontextprotocol/inspector python k8s_mcp_server_local.py
 ```
 
+## Transport Configuration
+
+The MCP server supports two transport variants. **Always check `.mcp.json` to determine which transport is actually configured** before stating which one is in use. Do not assume the transport based on defaults or documentation — read the actual configuration.
+
+- **STDIO** — `"type": "stdio"` in `.mcp.json`, runs `k8s_mcp_server_local.py` via stdin/stdout JSON-RPC.
+- **Streamable HTTP** — `"type": "http"` in `.mcp.json`, connects to `k8s_mcp_server_http.py` (Starlette/Uvicorn) at the configured URL (e.g., `http://localhost:8000/messages`).
+
 ## Architecture
 
 Two server files share identical tool implementations but differ in transport:
