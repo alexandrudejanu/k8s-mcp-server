@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+.venv
+
+# Git
+.git
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Documentation
+README.md
+CLAUDE.md
+*.md
+
+# Local config
+.env
+.env.local
+*.local
+
+# Test files
+test_*.py
+*_test.py
+tests/
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+
+# Other MCP server variants
+k8s_mcp_server.py
+k8s_mcp_server_local.py
