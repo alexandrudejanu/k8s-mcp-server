@@ -1,0 +1,11 @@
+[project]
+name = "kubernetes-mcp-server"
+version = "0.1.0"
+description = "MCP server for Kubernetes cluster assessment"
+dependencies = [
+    "mcp>=0.9.0",
+    "kubernetes>=28.0.0"
+]
+
+[project.scripts]
+kubernetes-mcp-server = "k8s_mcp_server:main"
