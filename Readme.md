@@ -36,62 +36,7 @@ mcp-inspector python k8s_mcp_server.py
 npx @modelcontextprotocol/inspector --transport streamablehttp http://localhost:8000/messages
 ```
 
-### Integrate with Claude: 
-
-* As a process that is expecting JSON-RPC messages at STDIN: `python k8s_mcp_server.py`
-
-```bash
-
-# stdio Transport: Claude launches your Python script as a subprocess
-cat<<EOF>~/.claude/code_config.json
-{
-  "mcpServers": {
-    "kubernetes": {
-      "command": "/Users/alexandru.dejanu/tools/k8s-mcp-server/venv/bin/python",
-      "args": [
-        "${HOME}/tools/k8s-mcp-server/k8s_mcp_server_local.py"
-      ],
-      "env": {
-        "KUBECONFIG": "${HOME}/.kube/config"
-      }
-    }
-  }
-}
-EOF
-```
-* As Streamable HTTP server: Streamable HTTP replaces the HTTP+SSE transport 
-
-```bash
-docker compose -f docker-compose.yml up --build -d
-docker compose -f docker-compose.yml down --remove-orphans
-
- docker run -d \
-        --name k8s-mcp-server \
-        -p 8000:8000 \
-        -v "${HOME}/.kube/config:/root/.kube/config:ro" \
-        -e KUBECONFIG=/root/.kube/config \
-        dejanualex/k8s-mcp-server:0.1.0
-
-# HTTP/SSE Transport: web server on port 8000 accesible at /mcp endpoint
-claude mcp add --transport http my-server http://localhost:8000/mcp
-claude mcp add --transport http kubernetes http://localhost:8000/messages
-claude mcp reset-project-choices   
-
-cat > ~/.claude/code_config.json<<EOF
-{
-  "mcpServers": {
-    "kubernetes": {
-    "transport": "http",                                                                              
-    "url": "http://localhost:8000/messages"  
-    }
-  }
-}
-EOF
-
-
-```
-
-### Prompts and stuff
+### Prompts 
 
 * Prompts
 
