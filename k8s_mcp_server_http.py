@@ -130,6 +130,19 @@ async def list_tools() -> list[Tool]:
                 "properties": {},
                 "required": []
             }
+        ),
+        Tool(
+            name="check_networking",
+            description="Check cluster networking and Istio service mesh health: control plane status, sidecar injection coverage, proxy version consistency, Istio config (VirtualServices, DestinationRules, Gateways), services with missing endpoints, and NetworkPolicies",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "namespace": {
+                        "type": "string",
+                        "description": "Optional: specific namespace to check (default: all namespaces)"
+                    }
+                }
+            }
         )
     ]
 
@@ -155,6 +168,9 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
             return await diagnose_cluster()
         elif name == "get_namespace_summary":
             return await get_namespace_summary()
+        elif name == "check_networking":
+            namespace = arguments.get("namespace", None)
+            return await check_networking(namespace)
         else:
             return [TextContent(type="text", text=f"Unknown tool: {name}")]
             
@@ -289,7 +305,7 @@ async def check_pod_health(namespace: str = None) -> Sequence[TextContent]:
     
     # Problem pods
     if problem_pods:
-        result += f"\n⚠ Problem Pods ({len(problem_pods)}):\n"
+        result += f"\n Problem Pods ({len(problem_pods)}):\n"
         result += "─" * 60 + "\n"
         for pod in problem_pods:
             result += f"\n  Pod: {pod['namespace']}/{pod['name']}\n"
@@ -518,6 +534,215 @@ async def get_namespace_summary() -> Sequence[TextContent]:
         result += f"  Deployments: {len(deps_by_ns.get(ns_name, []))}\n"
         result += f"  Services: {len(svcs_by_ns.get(ns_name, []))}\n"
         result += "\n"
+
+    return [TextContent(type="text", text=result)]
+
+
+async def check_networking(namespace: str = None) -> Sequence[TextContent]:
+    """Check cluster networking and Istio service mesh health"""
+    from collections import defaultdict
+
+    def _fetch():
+        v1 = client.CoreV1Api()
+        custom_api = client.CustomObjectsApi()
+        networking_api = client.NetworkingV1Api()
+
+        # --- Istio control plane ---
+        istio_pods = []
+        try:
+            istio_pods = v1.list_namespaced_pod("istio-system").items
+        except ApiException:
+            pass
+
+        # --- All pods (for sidecar analysis) ---
+        if namespace:
+            all_pods = v1.list_namespaced_pod(namespace).items
+        else:
+            all_pods = v1.list_pod_for_all_namespaces().items
+
+        # --- Services and Endpoints (missing endpoints check) ---
+        if namespace:
+            services = v1.list_namespaced_service(namespace).items
+            endpoints = v1.list_namespaced_endpoints(namespace).items
+        else:
+            services = v1.list_service_for_all_namespaces().items
+            endpoints = v1.list_endpoints_for_all_namespaces().items
+
+        # --- NetworkPolicies ---
+        if namespace:
+            net_policies = networking_api.list_namespaced_network_policy(namespace).items
+        else:
+            net_policies = networking_api.list_network_policy_for_all_namespaces().items
+
+        # --- Istio CRDs (VirtualService, DestinationRule, Gateway) ---
+        istio_resources = {}
+        istio_crds = [
+            ("networking.istio.io", "v1", "virtualservices"),
+            ("networking.istio.io", "v1", "destinationrules"),
+            ("networking.istio.io", "v1", "gateways"),
+            ("networking.istio.io", "v1", "serviceentries"),
+            ("security.istio.io", "v1", "peerauthentications"),
+        ]
+        for group, version, plural in istio_crds:
+            try:
+                if namespace:
+                    items = custom_api.list_namespaced_custom_object(
+                        group=group, version=version, namespace=namespace, plural=plural
+                    ).get("items", [])
+                else:
+                    items = custom_api.list_cluster_custom_object(
+                        group=group, version=version, plural=plural
+                    ).get("items", [])
+                istio_resources[plural] = items
+            except ApiException:
+                istio_resources[plural] = None  # CRD not installed
+
+        return istio_pods, all_pods, services, endpoints, net_policies, istio_resources
+
+    (istio_pods, all_pods, services, endpoints,
+     net_policies, istio_resources) = await asyncio.to_thread(_fetch)
+
+    scope = f"Namespace: {namespace}" if namespace else "All Namespaces"
+    result = f"Networking & Istio Diagnostics ({scope}):\n"
+    result += "═" * 60 + "\n\n"
+
+    # ── 1. Istio Control Plane ──
+    result += "Istio Control Plane:\n"
+    result += "─" * 60 + "\n"
+    if not istio_pods:
+        result += "  ⚠ No pods found in istio-system (Istio may not be installed)\n"
+    else:
+        for pod in istio_pods:
+            phase = pod.status.phase
+            indicator = "✓" if phase == "Running" else "✗"
+            result += f"  {indicator} {pod.metadata.name}: {phase}\n"
+    result += "\n"
+
+    # ── 2. Sidecar Injection Coverage ──
+    result += "Sidecar Injection Coverage:\n"
+    result += "─" * 60 + "\n"
+    ns_total = defaultdict(int)
+    ns_injected = defaultdict(int)
+    proxy_versions = defaultdict(int)
+
+    for pod in all_pods:
+        ns_name = pod.metadata.namespace
+        ns_total[ns_name] += 1
+        containers = pod.spec.containers or []
+        for c in containers:
+            if c.name == "istio-proxy":
+                ns_injected[ns_name] += 1
+                # Extract proxy version from image tag
+                if c.image and ":" in c.image:
+                    version = c.image.rsplit(":", 1)[1]
+                    proxy_versions[version] += 1
+                break
+
+    total_pods = sum(ns_total.values())
+    total_injected = sum(ns_injected.values())
+
+    if total_injected == 0:
+        result += "  ⚠ No istio-proxy sidecars detected in any pod\n"
+    else:
+        result += f"  Total: {total_injected}/{total_pods} pods have sidecar "
+        result += f"({total_injected * 100 // total_pods}%)\n\n"
+        for ns_name in sorted(ns_total.keys()):
+            injected = ns_injected.get(ns_name, 0)
+            total = ns_total[ns_name]
+            pct = injected * 100 // total if total else 0
+            indicator = "✓" if injected == total else ("~" if injected > 0 else "✗")
+            result += f"  {indicator} {ns_name}: {injected}/{total} ({pct}%)\n"
+    result += "\n"
+
+    # ── 3. Proxy Version Consistency ──
+    result += "Proxy Version Consistency:\n"
+    result += "─" * 60 + "\n"
+    if not proxy_versions:
+        result += "  N/A (no sidecars detected)\n"
+    elif len(proxy_versions) == 1:
+        ver, count = next(iter(proxy_versions.items()))
+        result += f"  ✓ All {count} proxies running version: {ver}\n"
+    else:
+        result += f"  ⚠ Mixed versions detected ({len(proxy_versions)} versions):\n"
+        for ver, count in sorted(proxy_versions.items(), key=lambda x: -x[1]):
+            result += f"    - {ver}: {count} proxies\n"
+    result += "\n"
+
+    # ── 4. Services with Missing Endpoints ──
+    result += "Services with Missing Endpoints:\n"
+    result += "─" * 60 + "\n"
+    ep_map = {}
+    for ep in endpoints:
+        key = f"{ep.metadata.namespace}/{ep.metadata.name}"
+        addresses = []
+        for subset in (ep.subsets or []):
+            addresses.extend(subset.addresses or [])
+        ep_map[key] = len(addresses)
+
+    no_endpoint_svcs = []
+    for svc in services:
+        # Skip headless and ExternalName services
+        if svc.spec.type == "ExternalName":
+            continue
+        if svc.spec.cluster_ip == "None":
+            continue
+        key = f"{svc.metadata.namespace}/{svc.metadata.name}"
+        if ep_map.get(key, 0) == 0:
+            no_endpoint_svcs.append(key)
+
+    if no_endpoint_svcs:
+        result += f"  ⚠ {len(no_endpoint_svcs)} service(s) with no ready endpoints:\n"
+        for svc_name in no_endpoint_svcs[:20]:
+            result += f"    - {svc_name}\n"
+        if len(no_endpoint_svcs) > 20:
+            result += f"    ... and {len(no_endpoint_svcs) - 20} more\n"
+    else:
+        result += "  ✓ All services have ready endpoints\n"
+    result += "\n"
+
+    # ── 5. Istio Configuration Summary ──
+    result += "Istio Configuration:\n"
+    result += "─" * 60 + "\n"
+    crd_labels = {
+        "virtualservices": "VirtualServices",
+        "destinationrules": "DestinationRules",
+        "gateways": "Gateways",
+        "serviceentries": "ServiceEntries",
+        "peerauthentications": "PeerAuthentications",
+    }
+    istio_installed = False
+    for plural, label in crd_labels.items():
+        items = istio_resources.get(plural)
+        if items is None:
+            result += f"  - {label}: CRD not installed\n"
+        else:
+            istio_installed = True
+            if items:
+                # Count per namespace
+                ns_counts = defaultdict(int)
+                for item in items:
+                    ns_counts[item["metadata"].get("namespace", "<cluster>")] += 1
+                parts = [f"{ns}: {c}" for ns, c in sorted(ns_counts.items())]
+                result += f"  {label} ({len(items)}): {', '.join(parts)}\n"
+            else:
+                result += f"  {label}: 0\n"
+    if not istio_installed:
+        result += "  ⚠ No Istio CRDs found — Istio is not installed\n"
+    result += "\n"
+
+    # ── 6. NetworkPolicies ──
+    result += "NetworkPolicies:\n"
+    result += "─" * 60 + "\n"
+    if not net_policies:
+        result += "No NetworkPolicies defined (all pod-to-pod traffic is allowed)\n"
+    else:
+        np_by_ns = defaultdict(int)
+        for np in net_policies:
+            np_by_ns[np.metadata.namespace] += 1
+        result += f"  Total: {len(net_policies)}\n"
+        for ns_name, count in sorted(np_by_ns.items()):
+            result += f"    {ns_name}: {count}\n"
+    result += "\n"
 
     return [TextContent(type="text", text=result)]
 

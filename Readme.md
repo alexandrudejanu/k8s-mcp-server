@@ -9,6 +9,7 @@ Assessment-only,  no mutations to the cluster:
 ✅ get_resource_usage - CPU/memory usage (requires metrics-server)
 ✅ diagnose_cluster - Comprehensive health check with issue detection
 ✅ get_namespace_summary - Resource counts per namespace
+[WIP] check_networking - Istio networking overview
 ```
 
 
