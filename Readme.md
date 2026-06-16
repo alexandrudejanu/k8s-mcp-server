@@ -1,93 +1,75 @@
-## MCP What's the health of my Kubernetes cluster?
+## k8s-mcp Overview
 
-Assessment-only,  no mutations to the cluster:
+The Kubernetes MCP server is a **read-only assessment service** that exposes cluster health and diagnostics tools to AI clients via the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/). It runs as a pod in a **hosting cluster** and queries **remote target clusters** over the Kubernetes API using credentials baked into the container image.
 
-```
-✅ get_cluster_info - Version, node count, namespace count
-✅ check_node_health - Node conditions, capacity, allocatable resources
-✅ check_pod_health - Pod status across namespaces, problem detection
-✅ get_resource_usage - CPU/memory usage (requires metrics-server)
-✅ diagnose_cluster - Comprehensive health check with issue detection
-✅ get_namespace_summary - Resource counts per namespace
-[WIP] check_networking - Istio networking overview
-```
+**Hosting cluster:** `ai-aws-prod-use1-0`  
+**Namespace:** `mcp`  
+**MCP endpoint:** `http://k8s-mcp-server.mcp.svc.cluster.local:8885/messages`
+
+The server does not mutate clusters — all tools are `get` / `list` only.
+
+**Key idea:** The MCP server lives in `ai-aws-prod-use1-0` but does **not** inspect that cluster by default. It uses a multi-context kubeconfig to reach **other** Kubernetes clusters over their K8S API endpoint.
+
+For each target cluster, the MCP pod in `ai-aws-prod-use1-0` must have **egress** to that cluster's API server
+
+## MCP tools
+
+**Context management**
+
+- `list_kubeconfig_contexts` — available clusters
+- `set_kubeconfig_context` — switch active cluster for the session
+- `get_kubeconfig_context` — show current cluster
+
+**Cluster assessment (read-only)**
+
+- `get_cluster_info` — version, nodes, namespaces, Pending/Failed pods, Warning events
+- `check_node_health`
+- `check_pod_health`
+- `get_resource_usage` — requires metrics-server on target
+- `diagnose_cluster`
+- `get_namespace_summary`
+- `check_networking` — Istio / NetworkPolicies (optional CRDs)
 
 
-* Server:
-    
-    - Tools: `get_cluster_info, check_node_health, check_pod_health, get_resource_usage, diagnose_cluster, get_namespace_summary`
-    - Tool Handler
-    - MCP server setup: [Clients SHOULD support stdio whenever possible](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports#streamable-http)
-    - Two transport modes:
-        - STDIO (k8s_mcp_server_local.py) — for direct Claude Code integration via .mcp.json
-        - Streamable HTTP (k8s_mcp_server_http.py) — containerized deployment on port 8000, with SSE streaming and stateful sessions
+* MCP server setup: [Clients SHOULD support stdio whenever possible](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports#streamable-http)
+
+* Two transport modes:
+    - STDIO (`k8s_mcp_server_local.py`) — legacy 6-tool variant for local `.mcp.json` integration
+    - Streamable HTTP (`k8s_mcp_server_http.py`) — production deployment on port `8885` at `/messages`
 
 ## Test the MCP server
 
-* MCP inspector
+* Sart the server
 
 ```bash
-# setup a kubeconfig 
-export KUBECONFIG=~/.kube/config
+# start server
+uv run fastmcp run k8s_mcp_server_http.py --transport http --host 0.0.0.0 --port 8885
+
+# start mcp inspector
+uv run fastmcp dev inspector k8s_mcp_server_http.py
 
 # install inspector and run server
 npm install -g @modelcontextprotocol/inspector
 
-mcp-inspector python k8s_mcp_server.py
-npx @modelcontextprotocol/inspector --transport streamablehttp http://localhost:8000/messages
+# Streamable HTTP MCP transport
+npx @modelcontextprotocol/inspector --transport http --server-url http://localhost:8885/messages
 ```
 
-### Prompts 
+* Build image
 
-* Prompts
+```bash
+
+docker build --platform linux/amd64,linux/arm64 -t dejanualex/k8s-mcp-server:2.0 .
+docker push dejanualex/k8s-mcp-server:2.0
+
+# user ECR
+docker build --no-cache --platform linux/amd64,linux/arm64 -t 209202477790.dkr.ecr.us-east-1.amazonaws.com/alchemy-docker/k8s-mcp-server:1.3 .
+docker push  209202477790.dkr.ecr.us-east-1.amazonaws.com/alchemy-docker/k8s-mcp-server:1.3
+```
+### Prompt examples 
+
 
 ```
 Is the cluster healthy?
-Are all nodes ready? 
-Show me any pods that are not running  
-Diagnose the cluster and explain what needs attention
-
-Are there any nodes under resource pressure?
-Show resource usage and identify which nodes are overloaded
-Which pods are consuming the most CPU and memory?
-Is there enough capacity to schedule more workloads?
-
-Give me a summary of all namespaces
-
-Give me a full cluster assessment — nodes, pods, resource usage, and any issues
-Compare resource usage across nodes , is the workload balanced?
-
-Diagnose the cluster and explain what needs attention
-What's the overall state of the cluster and what should I fix first?
-```
-
-* mcp.json
-
-```json
-
-{
-  "mcpServers": {
-    "kubernetes": {
-      "command": "/Users/alexandru.dejanu/tools/k8s-mcp-server/venv/bin/python",
-      "args": [
-        "/Users/alexandru.dejanu/tools/k8s-mcp-server/k8s_mcp_server_local.py"
-      ],
-      "env": {
-        "KUBECONFIG": "/abs/path/to/kubeconfig"
-      }
-    }
-  }
-}
-```
-
-
-```json
-{
-  "mcpServers": {
-    "kubernetes": {
-      "type": "http",
-      "url": "http://localhost:8000/messages"
-    }
-  }
-}
+list cluster nodes
 ```

@@ -1,25 +1,28 @@
-FROM python:3.11-slim
+FROM python:3.12-slim-trixie
 
-LABEL org.opencontainers.image.authors="dejanualex"
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
+LABEL org.opencontainers.image.authors="dejanualex@gmail.com"
 
 WORKDIR /app
 
-# needed so pip can build C extensions when wheels are not available
-RUN apt-get update && apt-get install -y \
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    PYTHONUNBUFFERED=1 \
+    PORT=8885
+
+# needed so uv can build C extensions when wheels are not available
+RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
+COPY pyproject.toml uv.lock ./
+COPY k8s_mcp_server_http.py k8s_tools.py ./
+COPY kubeconfig/ ./kubeconfig/
 
-RUN --mount=type=bind,source=requirements.txt,target=/tmp/requirements.txt \
-    pip install --no-cache-dir -r  /tmp/requirements.txt
+RUN uv sync --frozen --no-dev
 
-COPY k8s_mcp_server_http.py .
+EXPOSE 8885
 
-EXPOSE 8000
-
-ENV PYTHONUNBUFFERED=1
-ENV PORT=8000
-
-CMD ["python", "k8s_mcp_server_http.py"]
+CMD ["uv", "run", "python", "k8s_mcp_server_http.py"]
