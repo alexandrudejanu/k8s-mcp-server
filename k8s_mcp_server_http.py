@@ -31,8 +31,7 @@ from k8s_tools import (
 )
 
 configure_kubernetes(
-    use_baked_kubeconfig=os.getenv("USE_BAKED_KUBECONFIG", "false").lower()
-    in ("1", "true", "yes"),
+    kubeconfig_path=os.getenv("KUBECONFIG"),
     default_context=os.getenv("KUBECONFIG_CONTEXT"),
 )
 
@@ -68,7 +67,7 @@ CONTEXT_PARAM = (
 
 @mcp.tool(
     description=(
-        "List kubeconfig contexts in the baked config and show which one is active "
+        "List kubeconfig contexts and show which one is active "
         "for this session. Call when the user asks which clusters are available."
     )
 )

@@ -2,65 +2,72 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Project Overview
+## What this is
 
-A Python MCP (Model Context Protocol) server that exposes Kubernetes cluster health and diagnostics tools. Implements MCP spec 2025-11-25 with two transport variants: STDIO (local) and Streamable HTTP (containerized).
+A read-only Kubernetes MCP (Model Context Protocol) server that exposes cluster health and diagnostic tools to AI clients. It runs as a pod in  `mcp` namespace and queries **remote** target clusters via a multi-context kubeconfig mounted from the `k8s-mcp-kubeconfig` Secret.
 
-## Development Setup
-
-```bash
-# Create and activate virtualenv (Python 3.10+)
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-```
-
-Requires a valid kubeconfig (defaults to `~/.kube/config`).
-
-## Running
+## Running locally
 
 ```bash
-# Local STDIO mode (used by Claude Code via .mcp.json)
-python k8s_mcp_server_local.py
+# Install dependencies
+uv sync
 
-# HTTP mode
-python k8s_mcp_server_http.py  # listens on port 8000
+# Start the HTTP server (port 8885)
+uv run fastmcp run k8s_mcp_server_http.py --transport http --host 0.0.0.0 --port 8885
+# or equivalently
+uv run python k8s_mcp_server_http.py
 
-# Docker
-docker compose -f docker-compose.yml up --build -d
+# Run with Docker Compose (mounts ~/.kube/config for multi-cluster mode)
+docker compose up --build
 
-# Test with MCP Inspector
-npx @modelcontextprotocol/inspector python k8s_mcp_server_local.py
+# Inspect via MCP Inspector
+npx @modelcontextprotocol/inspector --transport http --server-url http://localhost:8885/messages
+
+# Health check
+curl http://localhost:8885/health
 ```
 
-## Transport Configuration
+## Building and pushing the image
 
-The MCP server supports two transport variants. **Always check `.mcp.json` to determine which transport is actually configured** before stating which one is in use. Do not assume the transport based on defaults or documentation — read the actual configuration.
+```bash
+docker build --platform linux/amd64,linux/arm64 -t dejanualex/k8s-mcp-server:3.0 .
+docker push dejanualex/k8s-mcp-server:3.0
+```
 
-- **STDIO** — `"type": "stdio"` in `.mcp.json`, runs `k8s_mcp_server_local.py` via stdin/stdout JSON-RPC.
-- **Streamable HTTP** — `"type": "http"` in `.mcp.json`, connects to `k8s_mcp_server_http.py` (Starlette/Uvicorn) at the configured URL (e.g., `http://localhost:8000/messages`).
+## Environment variables
+
+| Variable | Purpose |
+|---|---|
+| `KUBECONFIG` | Path to kubeconfig file — enables multi-cluster mode |
+| `KUBECONFIG_CONTEXT` | Default context name at startup |
+| `PORT` | Server port (default `8885`) |
+
+Without `KUBECONFIG`, the server falls back to in-cluster config (hosting cluster only).
 
 ## Architecture
 
-Two server files share identical tool implementations but differ in transport:
+Two source files contain all the logic:
 
-- **k8s_mcp_server_local.py** — STDIO transport for direct Claude Code integration. Communicates via stdin/stdout JSON-RPC.
-- **k8s_mcp_server_http.py** — Streamable HTTP transport using Starlette/Uvicorn. Exposes `/messages` (POST/GET/DELETE) and `/health` endpoints. Uses `StreamableHTTPSessionManager` for stateful sessions.
+- **`k8s_mcp_server_http.py`** — FastMCP server entry point. Registers MCP tools, applies the `_handle_tool_errors` decorator to return errors as strings instead of exceptions, and exposes a `/health` endpoint. Calls `configure_kubernetes()` at module load time from env vars.
 
-Both files follow the same internal structure:
-1. `init_kubernetes()` — tries in-cluster config, falls back to kubeconfig
-2. `@app.list_tools()` — registers 6 tools with JSON schemas
-3. `@app.call_tool()` — routes tool name to async handler function
-4. Individual async tool functions (`get_cluster_info`, `check_node_health`, `check_pod_health`, `get_resource_usage`, `diagnose_cluster`, `get_namespace_summary`)
+- **`k8s_tools.py`** — All tool implementations. Manages kubeconfig state in module-level globals (`_k8s_initialized`, `_loaded_context`, etc.). Since the `kubernetes` Python client is synchronous, all API calls are wrapped with `asyncio.to_thread()`. Every tool accepts an optional `context` parameter for a one-off cluster override; `set_kubeconfig_context` changes the session-level context for all subsequent calls.
 
-The tool implementations are duplicated across both files (not shared via a common module).
+**`k8s_resources/`** contains the production Kubernetes manifests:
+- `deployment.yaml` — pod spec with kubeconfig Secret volume mount
+- `rbac.yaml` — ServiceAccount and ClusterRole for the hosting cluster
+- `remote_cluster_rbac.yaml` — read-only RBAC for target clusters
+- `kubeconfig-secret.yaml` — template for the multi-context kubeconfig Secret
 
-## Key Dependencies
+## Key design patterns
 
-- `mcp` — MCP protocol framework (server, tools, transports)
-- `kubernetes` — Official Python client for Kubernetes API
-- `starlette` + `uvicorn` — ASGI server (HTTP variant only)
+- **Context switching is session-global**: `set_kubeconfig_context` mutates module-level state in `k8s_tools.py`. There is no per-request isolation.
+- **Error handling at the tool boundary**: `_handle_tool_errors` in the HTTP server catches all exceptions and returns them as plain strings. Tool implementations in `k8s_tools.py` do not need their own try/except.
+- **Optional CRDs**: `check_networking` silently skips Istio CRD queries when they return 404 — Istio is treated as optional.
+- **Metrics-server optional**: `get_resource_usage` degrades gracefully when the metrics API is unavailable (404 → informational message).
 
-## Docker
+## Production deployment
 
-The Dockerfile builds the HTTP variant only. The docker-compose mounts `~/.kube/config` read-only into the container. Health check hits `GET /health` on port 8000.
+- **Hosting cluster**: `ai-aws-prod-use1-0`, namespace `mcp`
+- **MCP endpoint**: `http://k8s-mcp-server.mcp.svc.cluster.local:8885/messages`
+- **Kubeconfig**: Secret `k8s-mcp-kubeconfig` mounted at `/etc/kubeconfig/config`
+- To add a new target cluster: update the Secret and rollout-restart the pod — no image rebuild needed.

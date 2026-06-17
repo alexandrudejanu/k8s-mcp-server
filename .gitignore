@@ -214,3 +214,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local kubeconfig with cluster credentials (use config.example as template)
+kubeconfig/*

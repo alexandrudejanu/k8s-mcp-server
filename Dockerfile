@@ -19,7 +19,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY pyproject.toml uv.lock ./
 COPY k8s_mcp_server_http.py k8s_tools.py ./
-COPY kubeconfig/ ./kubeconfig/
 
 RUN uv sync --frozen --no-dev
 

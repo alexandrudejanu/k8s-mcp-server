@@ -1,16 +1,18 @@
 ## k8s-mcp Overview
 
-The Kubernetes MCP server is a **read-only assessment service** that exposes cluster health and diagnostics tools to AI clients via the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/). It runs as a pod in a **hosting cluster** and queries **remote target clusters** over the Kubernetes API using credentials baked into the container image.
+The Kubernetes MCP server is a **read-only assessment service** that exposes cluster health and diagnostics tools to AI clients via the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/). It runs as a pod in a **hosting cluster** and queries **remote target clusters** over the Kubernetes API using a multi-context kubeconfig mounted from a Kubernetes Secret.
 
 **Hosting cluster:** `ai-aws-prod-use1-0`  
 **Namespace:** `mcp`  
+**Kubeconfig secret:** `k8s-mcp-kubeconfig` (mounted at `/etc/kubeconfig/config`)  
 **MCP endpoint:** `http://k8s-mcp-server.mcp.svc.cluster.local:8885/messages`
 
 The server does not mutate clusters — all tools are `get` / `list` only.
 
-**Key idea:** The MCP server lives in `ai-aws-prod-use1-0` but does **not** inspect that cluster by default. It uses a multi-context kubeconfig to reach **other** Kubernetes clusters over their K8S API endpoint.
-
-For each target cluster, the MCP pod in `ai-aws-prod-use1-0` must have **egress** to that cluster's API server
+The MCP server lives in `ai-aws-prod-use1-0` but does **not** inspect that cluster by default. 
+Context management is done via require `k8s-mcp-kubeconfig` secret that contains a multi-context kubeconfig in order to reach **other** Kubernetes clusters over their API endpoints.
+In order to enroll new cluster update the `k8s-mcp-kubeconfig` secret. No image rebuild required, just a rollout restart of the `k8s-mcp`.
+For each target cluster, the MCP pod in `ai-aws-prod-use1-0` must have **egress** to that cluster's API server.
 
 ## MCP tools
 

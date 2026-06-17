@@ -8,10 +8,9 @@ from kubernetes import client, config
 from kubernetes.client.rest import ApiException
 
 
-BAKED_KUBECONFIG_PATH = "/app/kubeconfig/config"
-
 _k8s_initialized = False
-_use_baked_kubeconfig = False
+_kubeconfig_path: str | None = None
+_external_kubeconfig_enabled = False
 _default_context: str | None = None
 _loaded_context: str | None = None
 
@@ -28,17 +27,28 @@ def _context_name(context: object) -> str | None:
 
 def configure_kubernetes(
     *,
-    use_baked_kubeconfig: bool,
+    kubeconfig_path: str | None = None,
     default_context: str | None = None,
 ) -> None:
-    """Set kubeconfig mode and optional default context name."""
-    global _use_baked_kubeconfig, _default_context
-    _use_baked_kubeconfig = use_baked_kubeconfig
+    """Set kubeconfig file path and optional default context name."""
+    global _kubeconfig_path, _external_kubeconfig_enabled, _default_context
+    _kubeconfig_path = kubeconfig_path
+    _external_kubeconfig_enabled = bool(
+        kubeconfig_path and os.path.exists(kubeconfig_path)
+    )
     _default_context = default_context
 
 
+def _kubeconfig_file() -> str:
+    if not _kubeconfig_path:
+        raise FileNotFoundError("KUBECONFIG path not configured")
+    if not os.path.exists(_kubeconfig_path):
+        raise FileNotFoundError(f"Kubeconfig not found at {_kubeconfig_path}")
+    return _kubeconfig_path
+
+
 def init_kubernetes(
-    use_baked_kubeconfig: bool = False,
+    use_external_kubeconfig: bool = False,
     context: str | None = None,
 ) -> None:
     """Initialize or switch Kubernetes client configuration."""
@@ -48,14 +58,11 @@ def init_kubernetes(
     if _k8s_initialized and target_context == _loaded_context:
         return
 
-    if use_baked_kubeconfig:
-        if not os.path.exists(BAKED_KUBECONFIG_PATH):
-            raise FileNotFoundError(
-                f"Baked kubeconfig not found at {BAKED_KUBECONFIG_PATH}"
-            )
-        _, active_context = config.list_kube_config_contexts(BAKED_KUBECONFIG_PATH)
+    if use_external_kubeconfig:
+        kubeconfig = _kubeconfig_file()
+        _, active_context = config.list_kube_config_contexts(kubeconfig)
         config.load_kube_config(
-            config_file=BAKED_KUBECONFIG_PATH,
+            config_file=kubeconfig,
             context=target_context,
         )
         _loaded_context = target_context or _context_name(active_context)
@@ -70,16 +77,16 @@ def init_kubernetes(
 
 
 def _init_kubernetes(context: str | None = None) -> None:
-    init_kubernetes(use_baked_kubeconfig=_use_baked_kubeconfig, context=context)
+    init_kubernetes(use_external_kubeconfig=_external_kubeconfig_enabled, context=context)
 
 
 def _available_context_names() -> list[str]:
-    contexts, _ = config.list_kube_config_contexts(BAKED_KUBECONFIG_PATH)
+    contexts, _ = config.list_kube_config_contexts(_kubeconfig_file())
     return [entry["name"] for entry in contexts]
 
 
 def _cluster_for_context(context_name: str) -> str:
-    contexts, _ = config.list_kube_config_contexts(BAKED_KUBECONFIG_PATH)
+    contexts, _ = config.list_kube_config_contexts(_kubeconfig_file())
     for entry in contexts:
         if entry["name"] == context_name:
             return entry["context"]["cluster"]
@@ -88,13 +95,13 @@ def _cluster_for_context(context_name: str) -> str:
 
 async def get_kubeconfig_context() -> str:
     """Return the active session kubeconfig context."""
-    if not _use_baked_kubeconfig:
+    if not _external_kubeconfig_enabled:
         return (
-            "Session context switching is only available when USE_BAKED_KUBECONFIG=true. "
+            "Session context switching requires KUBECONFIG pointing to a mounted kubeconfig file. "
             "In in-cluster mode the server uses the hosting cluster only."
         )
 
-    _, file_active = config.list_kube_config_contexts(BAKED_KUBECONFIG_PATH)
+    _, file_active = config.list_kube_config_contexts(_kubeconfig_file())
     active = _loaded_context or _default_context or _context_name(file_active)
     if not active:
         return "No active context. Call set_kubeconfig_context to select a cluster."
@@ -109,15 +116,12 @@ async def set_kubeconfig_context(context: str) -> str:
     """Set the active kubeconfig context for this MCP server session."""
     global _default_context, _k8s_initialized, _loaded_context
 
-    if not _use_baked_kubeconfig:
+    if not _external_kubeconfig_enabled:
         return (
-            "Context switching is only available when USE_BAKED_KUBECONFIG=true. "
+            "Context switching requires KUBECONFIG pointing to a mounted kubeconfig file. "
             "In in-cluster mode the server uses the hosting cluster only."
         )
-    if not os.path.exists(BAKED_KUBECONFIG_PATH):
-        raise FileNotFoundError(
-            f"Baked kubeconfig not found at {BAKED_KUBECONFIG_PATH}"
-        )
+    _kubeconfig_file()
 
     names = _available_context_names()
     if context not in names:
@@ -127,7 +131,7 @@ async def set_kubeconfig_context(context: str) -> str:
     _default_context = context
     _k8s_initialized = False
     _loaded_context = None
-    init_kubernetes(use_baked_kubeconfig=True, context=context)
+    init_kubernetes(use_external_kubeconfig=True, context=context)
 
     return (
         f"Active context set to: {context}\n"
@@ -137,18 +141,15 @@ async def set_kubeconfig_context(context: str) -> str:
 
 
 async def list_kubeconfig_contexts() -> str:
-    """List contexts in the baked kubeconfig and show the active one."""
-    if not _use_baked_kubeconfig:
+    """List contexts in the kubeconfig file and show the active one."""
+    if not _external_kubeconfig_enabled:
         return (
-            "Context listing is only available when USE_BAKED_KUBECONFIG=true. "
+            "Context listing requires KUBECONFIG pointing to a mounted kubeconfig file. "
             "In in-cluster mode the server uses the hosting cluster only."
         )
-    if not os.path.exists(BAKED_KUBECONFIG_PATH):
-        raise FileNotFoundError(
-            f"Baked kubeconfig not found at {BAKED_KUBECONFIG_PATH}"
-        )
+    kubeconfig = _kubeconfig_file()
 
-    contexts, file_active = config.list_kube_config_contexts(BAKED_KUBECONFIG_PATH)
+    contexts, file_active = config.list_kube_config_contexts(kubeconfig)
     active = _loaded_context or _context_name(file_active)
 
     result = "Available kubeconfig contexts:\n"
