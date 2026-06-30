@@ -3,6 +3,7 @@
 import asyncio
 import os
 from collections import defaultdict
+from datetime import datetime, timezone
 
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
@@ -190,93 +191,95 @@ def format_resource_usage(cpu, memory):
     return f"{cpu_cores:.2f} cores, {mem_gb:.2f} GB"
 
 
+def _format_age(creation_timestamp: datetime | None) -> str:
+    if not creation_timestamp:
+        return "unknown"
+    now = datetime.now(timezone.utc)
+    ts = creation_timestamp
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    delta = now - ts
+    if delta.days > 0:
+        return f"{delta.days}d"
+    hours = delta.seconds // 3600
+    if hours > 0:
+        return f"{hours}h"
+    return f"{max(delta.seconds // 60, 0)}m"
+
+
+NODE_ROLE_LABEL_DOMAIN = "node-role.kubernetes.io"
+
+
+def _node_roles(node: client.V1Node) -> str:
+    roles = []
+    for label_key in node.metadata.labels or {}:
+        domain, _, role = label_key.partition("/")
+        if domain == NODE_ROLE_LABEL_DOMAIN and role:
+            roles.append(role)
+    return ",".join(roles) if roles else "<none>"
+
+
+def _node_ready_status(node: client.V1Node) -> str:
+    for condition in node.status.conditions or []:
+        if condition.type == "Ready":
+            return "Ready" if condition.status == "True" else "NotReady"
+    return "Unknown"
+
+
+def _node_address(node: client.V1Node, address_type: str) -> str:
+    for address in node.status.addresses or []:
+        if address.type == address_type:
+            return address.address
+    return "<none>"
+
+
 async def get_cluster_info(context: str | None = None) -> str:
-    """Get cluster information."""
+    """Get Kubernetes API version info and nodes (kubectl get nodes -o wide)."""
 
     def _fetch():
         v1 = client.CoreV1Api()
         version_api = client.VersionApi()
         version_info = version_api.get_code()
-        v1.get_api_resources()
         nodes = v1.list_node()
-        namespaces = v1.list_namespace()
-        pods = v1.list_pod_for_all_namespaces()
-        events = v1.list_event_for_all_namespaces()
-        return version_info, nodes, namespaces, pods, events
+        return version_info, nodes
 
     _init_kubernetes(context)
-    version_info, nodes, namespaces, pods, events = await asyncio.to_thread(_fetch)
+    version_info, nodes = await asyncio.to_thread(_fetch)
 
-    pending_pods = []
-    failed_pods = []
-    for pod in pods.items:
-        phase = pod.status.phase
-        entry = f"{pod.metadata.namespace}/{pod.metadata.name}"
-        if phase == "Pending":
-            pending_pods.append(entry)
-        elif phase == "Failed":
-            failed_pods.append(entry)
-
-    warning_events = []
-    for event in events.items:
-        if event.type != "Warning":
-            continue
-        involved = event.involved_object
-        resource = (
-            f"{involved.namespace}/{involved.kind}/{involved.name}"
-            if involved.namespace
-            else f"{involved.kind}/{involved.name}"
-        )
-        warning_events.append(
-            {
-                "resource": resource,
-                "reason": event.reason or "Unknown",
-                "message": (event.message or "").replace("\n", " "),
-                "timestamp": event.last_timestamp or event.event_time or event.first_timestamp,
-            }
-        )
-
-    warning_events.sort(key=lambda e: e["timestamp"] or "", reverse=True)
-
-    result = f"""Cluster Information:
-─────────────────────
-Kubernetes Version: {version_info.git_version}
-Platform: {version_info.platform}
-API Server: Healthy
-Total Nodes: {len(nodes.items)}
-Total Namespaces: {len(namespaces.items)}
-"""
-
-    result += "\nPods Not Running:\n"
+    result = "Kubernetes API Version:\n"
     result += "─" * 60 + "\n"
-    if not pending_pods and not failed_pods:
-        result += "✓ No Pending or Failed pods\n"
-    else:
-        if pending_pods:
-            result += f"Pending ({len(pending_pods)}):\n"
-            for pod_name in pending_pods[:15]:
-                result += f"  - {pod_name}\n"
-            if len(pending_pods) > 15:
-                result += f"  ... and {len(pending_pods) - 15} more\n"
-        if failed_pods:
-            result += f"Failed ({len(failed_pods)}):\n"
-            for pod_name in failed_pods[:15]:
-                result += f"  - {pod_name}\n"
-            if len(failed_pods) > 15:
-                result += f"  ... and {len(failed_pods) - 15} more\n"
+    result += f"  gitVersion:   {version_info.git_version}\n"
+    result += f"  major:        {version_info.major}\n"
+    result += f"  minor:        {version_info.minor}\n"
+    result += f"  platform:     {version_info.platform}\n"
 
-    result += "\nRecent Warning Events:\n"
+    result += "\nNodes (wide):\n"
     result += "─" * 60 + "\n"
-    if not warning_events:
-        result += "✓ No warning events found\n"
-    else:
-        result += f"Total: {len(warning_events)} (showing latest 20)\n\n"
-        for event in warning_events[:20]:
-            ts = event["timestamp"]
-            ts_str = ts.strftime("%Y-%m-%d %H:%M:%S UTC") if ts else "unknown"
-            result += f"  [{ts_str}] {event['resource']}\n"
-            result += f"    {event['reason']}: {event['message'][:200]}\n"
+    header = (
+        f"{'NAME':<40} {'STATUS':<10} {'ROLES':<16} {'AGE':<6} "
+        f"{'VERSION':<16} {'INTERNAL-IP':<16} {'EXTERNAL-IP':<16}\n"
+    )
+    result += header
+    result += f"{'OS-IMAGE':<40} {'KERNEL-VERSION':<32} {'CONTAINER-RUNTIME':<32}\n"
+    result += "─" * 60 + "\n"
 
+    for node in sorted(nodes.items, key=lambda n: n.metadata.name):
+        info = node.status.node_info
+        name = node.metadata.name
+        result += (
+            f"{name:<40} {_node_ready_status(node):<10} {_node_roles(node):<16} "
+            f"{_format_age(node.metadata.creation_timestamp):<6} "
+            f"{(info.kubelet_version if info else 'N/A'):<16} "
+            f"{_node_address(node, 'InternalIP'):<16} "
+            f"{_node_address(node, 'ExternalIP'):<16}\n"
+        )
+        result += (
+            f"{(info.os_image if info else 'N/A'):<40} "
+            f"{(info.kernel_version if info else 'N/A'):<32} "
+            f"{(info.container_runtime_version if info else 'N/A'):<32}\n"
+        )
+
+    result += f"\nTotal nodes: {len(nodes.items)}\n"
     return result
 
 
@@ -515,10 +518,13 @@ async def diagnose_cluster(context: str | None = None) -> str:
 
     def _fetch():
         v1 = client.CoreV1Api()
-        return v1.list_node(), v1.list_pod_for_all_namespaces()
+        nodes = v1.list_node()
+        pods = v1.list_pod_for_all_namespaces()
+        events = v1.list_event_for_all_namespaces(field_selector="type=Warning")
+        return nodes, pods, events
 
     _init_kubernetes(context)
-    nodes, pods = await asyncio.to_thread(_fetch)
+    nodes, pods, events = await asyncio.to_thread(_fetch)
 
     result = "Cluster Diagnostics:\n"
     result += "═" * 60 + "\n\n"
@@ -554,7 +560,30 @@ async def diagnose_cluster(context: str | None = None) -> str:
                         f"(container: {container.name}, restarts: {container.restart_count})"
                     )
 
-    if not issues and not failing_pods and not pending_pods and not high_restart_pods:
+    warning_events = []
+    for event in events.items:
+        involved = event.involved_object
+        resource = (
+            f"{involved.namespace}/{involved.kind}/{involved.name}"
+            if involved.namespace
+            else f"{involved.kind}/{involved.name}"
+        )
+        warning_events.append(
+            {
+                "resource": resource,
+                "reason": event.reason or "Unknown",
+                "message": (event.message or "").replace("\n", " "),
+                "timestamp": event.last_timestamp or event.event_time or event.first_timestamp,
+            }
+        )
+
+    warning_events.sort(key=lambda e: e["timestamp"] or "", reverse=True)
+
+    has_issues = bool(
+        issues or failing_pods or pending_pods or high_restart_pods or warning_events
+    )
+
+    if not has_issues:
         result += "✓ No critical issues detected\n\n"
         result += "Cluster appears healthy!\n"
     else:
@@ -589,6 +618,17 @@ async def diagnose_cluster(context: str | None = None) -> str:
                 result += f"  - {pod}\n"
             if len(high_restart_pods) > 10:
                 result += f"  ... and {len(high_restart_pods) - 10} more\n"
+            result += "\n"
+
+        if warning_events:
+            result += f"Warning Events ({len(warning_events)}, showing latest 20):\n"
+            for event in warning_events[:20]:
+                ts = event["timestamp"]
+                ts_str = ts.strftime("%Y-%m-%d %H:%M:%S UTC") if ts else "unknown"
+                result += f"  [{ts_str}] {event['resource']}\n"
+                result += f"    {event['reason']}: {event['message'][:200]}\n"
+            if len(warning_events) > 20:
+                result += f"  ... and {len(warning_events) - 20} more\n"
 
     return result
 

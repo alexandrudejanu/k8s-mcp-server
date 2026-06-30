@@ -101,8 +101,7 @@ async def set_kubeconfig_context(context: str) -> str:
 
 @mcp.tool(
     description=(
-        "Get basic Kubernetes cluster information including version, API server status, "
-        "pods in Pending or Failed phase, and recent Warning events. "
+        "Get Kubernetes API version info and node information. "
         + CONTEXT_PARAM
     )
 )
@@ -153,7 +152,7 @@ async def get_resource_usage(
 @mcp.tool(
     description=(
         "Run comprehensive cluster diagnostics including failing pods, "
-        "resource pressure, and common issues. "
+        "resource pressure, warning events, and common issues. "
         + CONTEXT_PARAM
     )
 )
