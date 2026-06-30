@@ -327,6 +327,65 @@ async def check_node_health(context: str | None = None) -> str:
     return result
 
 
+def _format_pod_container_images(pod: client.V1Pod) -> str:
+    ns = pod.metadata.namespace
+    name = pod.metadata.name
+    phase = pod.status.phase if pod.status else "Unknown"
+
+    result = f"Pod: {ns}/{name} ({phase})\n"
+    result += "─" * 60 + "\n"
+
+    sections = [
+        ("Init Containers", pod.spec.init_containers or []),
+        ("Containers", pod.spec.containers or []),
+        ("Ephemeral Containers", pod.spec.ephemeral_containers or []),
+    ]
+    has_containers = False
+    for label, containers in sections:
+        if not containers:
+            continue
+        has_containers = True
+        result += f"{label}:\n"
+        for container in containers:
+            result += f"  - {container.name}: {container.image}\n"
+
+    if not has_containers:
+        result += "  (no containers defined)\n"
+
+    return result
+
+
+async def list_pod_images(
+    namespace: str,
+    pod: str | None = None,
+    context: str | None = None,
+) -> str:
+    """List container images for a pod or all pods in a namespace."""
+
+    def _fetch():
+        v1 = client.CoreV1Api()
+        if pod:
+            return [v1.read_namespaced_pod(name=pod, namespace=namespace)]
+        return v1.list_namespaced_pod(namespace).items
+
+    _init_kubernetes(context)
+    pods = await asyncio.to_thread(_fetch)
+
+    if pod and not pods:
+        return f"Pod not found: {namespace}/{pod}"
+
+    if pod:
+        header = f"Container Images ({namespace}/{pod}):\n"
+    else:
+        header = f"Container Images (namespace: {namespace}):\n"
+    result = header + "═" * 60 + "\n\n"
+
+    for item in sorted(pods, key=lambda p: p.metadata.name):
+        result += _format_pod_container_images(item) + "\n"
+
+    return result
+
+
 async def check_pod_health(
     namespace: str | None = None,
     context: str | None = None,

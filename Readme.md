@@ -58,7 +58,7 @@ flowchart LR
     subgraph http_layer [k8s_mcp_server_http.py]
         FastMCP[FastMCP kubernetes-mcp-server]
         Health["GET /health"]
-        Tools["@mcp.tool x10"]
+        Tools["@mcp.tool x11"]
         Errors[_handle_tool_errors]
     end
 
@@ -118,9 +118,10 @@ sequenceDiagram
 
 **Cluster assessment (read-only)**
 
-- `get_cluster_info` — version, nodes, namespaces, Pending/Failed pods, Warning events
+- `get_cluster_info` — Kubernetes API version and nodes (`kubectl get nodes -o wide`)
 - `check_node_health`
 - `check_pod_health`
+- `list_pod_images` — container image strings for a pod or all pods in a namespace
 - `get_resource_usage` — requires metrics-server on target
 - `diagnose_cluster`
 - `get_namespace_summary`
@@ -155,17 +156,18 @@ npx @modelcontextprotocol/inspector --transport http --server-url http://localho
 
 ```bash
 
-docker build --platform linux/amd64,linux/arm64 -t dejanualex/k8s-mcp-server:2.0 .
+docker build  --no-cache --platform linux/amd64,linux/arm64 -t dejanualex/k8s-mcp-server:2.1 .
 docker push dejanualex/k8s-mcp-server:2.0
 
 # user ECR
-docker build --no-cache --platform linux/amd64,linux/arm64 -t 209202477790.dkr.ecr.us-east-1.amazonaws.com/alchemy-docker/k8s-mcp-server:1.3 .
-docker push  209202477790.dkr.ecr.us-east-1.amazonaws.com/alchemy-docker/k8s-mcp-server:1.3
+docker build --no-cache --platform linux/amd64,linux/arm64 -t 209202477790.dkr.ecr.us-east-1.amazonaws.com/alchemy-docker/k8s-mcp-server:2.1 .
+docker push  209202477790.dkr.ecr.us-east-1.amazonaws.com/alchemy-docker/k8s-mcp-server:2.1
 ```
 ### Prompt examples 
 
 
 ```
+Which Kubernetes clusters can you reach?
 Is the cluster healthy?
-list cluster nodes
+Are there any failing or pending pods?
 ```

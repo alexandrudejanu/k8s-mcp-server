@@ -27,6 +27,7 @@ from k8s_tools import (
     get_resource_usage as get_resource_usage_impl,
     get_kubeconfig_context as get_kubeconfig_context_impl,
     list_kubeconfig_contexts as list_kubeconfig_contexts_impl,
+    list_pod_images as list_pod_images_impl,
     set_kubeconfig_context as set_kubeconfig_context_impl,
 )
 
@@ -133,6 +134,23 @@ async def check_pod_health(
     context: str | None = None,
 ) -> str:
     return await check_pod_health_impl(namespace, context)
+
+
+@mcp.tool(
+    description=(
+        "List container image strings for a pod. "
+        "Requires namespace; pass pod name for one pod, or omit pod to list all pods in the namespace. "
+        "Includes init containers and ephemeral containers. "
+        + CONTEXT_PARAM
+    )
+)
+@_handle_tool_errors
+async def list_pod_images(
+    namespace: str,
+    pod: str | None = None,
+    context: str | None = None,
+) -> str:
+    return await list_pod_images_impl(namespace, pod, context)
 
 
 @mcp.tool(
