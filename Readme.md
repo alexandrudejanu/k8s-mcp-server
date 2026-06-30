@@ -14,6 +14,100 @@ Context management is done via require `k8s-mcp-kubeconfig` secret that contains
 In order to enroll new cluster update the `k8s-mcp-kubeconfig` secret. No image rebuild required, just a rollout restart of the `k8s-mcp`.
 For each target cluster, the MCP pod in `ai-aws-prod-use1-0` must have **egress** to that cluster's API server.
 
+## Architecture
+
+### Deployment topology
+
+```mermaid
+flowchart TB
+    subgraph clients [MCP Clients]
+        Inspector[MCP Inspector / Claude / n8n]
+    end
+
+    subgraph hosting [Hosting cluster - ai-aws-prod-use1-0]
+        subgraph mcp_ns [namespace mcp]
+            SVC[Service k8s-mcp-server :8885]
+            Pod[k8s-mcp-server pod]
+            Secret[k8s-mcp-kubeconfig Secret]
+        end
+    end
+
+    subgraph target_a [Target cluster A]
+        API_A[Kubernetes API]
+        RBAC_A[pod-exec-user RBAC]
+    end
+
+    subgraph target_b [Target cluster B]
+        API_B[Kubernetes API]
+        RBAC_B[pod-exec-user RBAC]
+    end
+
+    Inspector -->|Streamable HTTP MCP| SVC
+    SVC --> Pod
+    Secret -->|volumeMount /etc/kubeconfig/config| Pod
+    Pod -->|KUBECONFIG + SA token| API_A
+    Pod -->|KUBECONFIG + SA token| API_B
+    RBAC_A -.-> API_A
+    RBAC_B -.-> API_B
+```
+
+### Code layout
+
+```mermaid
+flowchart LR
+    subgraph http_layer [k8s_mcp_server_http.py]
+        FastMCP[FastMCP kubernetes-mcp-server]
+        Health["GET /health"]
+        Tools["@mcp.tool x10"]
+        Errors[_handle_tool_errors]
+    end
+
+    subgraph tools_layer [k8s_tools.py]
+        Config[configure_kubernetes]
+        Init[init_kubernetes]
+        Context[context switching]
+        Assess[cluster assessment tools]
+    end
+
+    subgraph k8s_client [kubernetes Python client]
+        API[CoreV1Api / MetricsV1beta1Api / CRDs]
+    end
+
+    Client[MCP Client] -->|POST /messages| FastMCP
+    FastMCP --> Health
+    FastMCP --> Tools
+    Tools --> Errors
+    Errors --> Assess
+    Errors --> Context
+    Config --> Init
+    Context --> Init
+    Assess --> Init
+    Init --> API
+    API --> TargetClusters[Target cluster APIs]
+```
+
+### Request flow
+
+```mermaid
+sequenceDiagram
+    participant Client as MCP Client
+    participant HTTP as k8s_mcp_server_http.py
+    participant Tools as k8s_tools.py
+    participant API as Target cluster API
+
+    Client->>HTTP: POST /messages initialize
+    HTTP-->>Client: mcp-session-id + server capabilities
+
+    Client->>HTTP: notifications/initialized
+    Client->>HTTP: tools/call e.g. get_cluster_info
+    HTTP->>Tools: get_cluster_info_impl
+    Tools->>Tools: init_kubernetes context
+    Tools->>API: list nodes pods events
+    API-->>Tools: JSON responses
+    Tools-->>HTTP: formatted text
+    HTTP-->>Client: MCP tool result
+```
+
 ## MCP tools
 
 **Context management**
@@ -41,7 +135,7 @@ For each target cluster, the MCP pod in `ai-aws-prod-use1-0` must have **egress*
 
 ## Test the MCP server
 
-* Sart the server
+* Start the server
 
 ```bash
 # start server
