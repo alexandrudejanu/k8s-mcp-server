@@ -150,7 +150,7 @@ npx @modelcontextprotocol/inspector --transport http --server-url http://localho
 # port forward the mcp-k8s servers
 kubectl -n mcp port-forward svc/mcp-k8s 8885:8885
 
-# port forward the agent-gateway
+# port forward the agent-gateway: https://agentgatewayapi.computev2.use1.aws.i.alchemy.com/k8s-mcp/mcp
 kubectl port-forward -n agentgateway svc/agentgateway-ui 15000:80
 ```
 
