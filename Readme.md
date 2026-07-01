@@ -7,7 +7,7 @@ The Kubernetes MCP server is a **read-only assessment service** that exposes clu
 **Kubeconfig secret:** `k8s-mcp-kubeconfig` (mounted at `/etc/kubeconfig/config`)  
 **MCP endpoint:** `http://k8s-mcp-server.mcp.svc.cluster.local:8885/messages`
 
-The server does not mutate clusters — all tools are `get` / `list` only.
+The k8s mcp server does not mutate clusters — all tools are `get` / `list` only.
 
 The MCP server lives in `ai-aws-prod-use1-0` but does **not** inspect that cluster by default. 
 Context management is done via require `k8s-mcp-kubeconfig` secret that contains a multi-context kubeconfig in order to reach **other** Kubernetes clusters over their API endpoints.
@@ -34,21 +34,17 @@ flowchart TB
 
     subgraph target_a [Target cluster A]
         API_A[Kubernetes API]
-        RBAC_A[pod-exec-user RBAC]
     end
 
     subgraph target_b [Target cluster B]
         API_B[Kubernetes API]
-        RBAC_B[pod-exec-user RBAC]
     end
 
     Inspector -->|Streamable HTTP MCP| SVC
     SVC --> Pod
     Secret -->|volumeMount /etc/kubeconfig/config| Pod
-    Pod -->|KUBECONFIG + SA token| API_A
-    Pod -->|KUBECONFIG + SA token| API_B
-    RBAC_A -.-> API_A
-    RBAC_B -.-> API_B
+    Pod -->|SA + RBAC| API_A
+    Pod -->|SA + RBAC| API_B
 ```
 
 ### Code layout
@@ -150,6 +146,12 @@ npm install -g @modelcontextprotocol/inspector
 
 # Streamable HTTP MCP transport
 npx @modelcontextprotocol/inspector --transport http --server-url http://localhost:8885/messages
+
+# port forward the mcp-k8s servers
+kubectl -n mcp port-forward svc/mcp-k8s 8885:8885
+
+# port forward the agent-gateway
+kubectl port-forward -n agentgateway svc/agentgateway-ui 15000:80
 ```
 
 * Build image
@@ -163,11 +165,12 @@ docker push dejanualex/k8s-mcp-server:2.0
 docker build --no-cache --platform linux/amd64,linux/arm64 -t 209202477790.dkr.ecr.us-east-1.amazonaws.com/alchemy-docker/k8s-mcp-server:2.1 .
 docker push  209202477790.dkr.ecr.us-east-1.amazonaws.com/alchemy-docker/k8s-mcp-server:2.1
 ```
-### Prompt examples 
 
+### Prompt examples 
 
 ```
 Which Kubernetes clusters can you reach?
-Is the cluster healthy?
+Check cluster info
+Are there any issues in the cluster
 Are there any failing or pending pods?
 ```
